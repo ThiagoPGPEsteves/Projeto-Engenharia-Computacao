@@ -24,11 +24,25 @@ interface ExtractedPosition {
   confirmed: boolean;
 }
 
+export interface ExtractedTransaction {
+  id: string;
+  document_id: string;
+  description: string;
+  amount: number;
+  type: 'receita' | 'despesa';
+  category: string;
+  date: string;
+  confirmed: boolean;
+}
+
 export const ReviewExtraction = () => {
   const { user, loading: authLoading, role, allowedClientIds } = useAuthRole();
   const [positions, setPositions] = useState<ExtractedPosition[]>([]);
+  const [transactions, setTransactions] = useState<ExtractedTransaction[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Partial<ExtractedPosition>>({});
+  const [editingTxId, setEditingTxId] = useState<string | null>(null);
+  const [editTxValues, setEditTxValues] = useState<Partial<ExtractedTransaction>>({});
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
   const navigate = useNavigate();
@@ -43,6 +57,7 @@ export const ReviewExtraction = () => {
     try {
       if (!allowedClientIds.length) {
         setPositions([]);
+        setTransactions([]);
         return;
       }
 
@@ -55,6 +70,7 @@ export const ReviewExtraction = () => {
       const docIds = docs?.map((d) => d.id) ?? [];
       if (!docIds.length) {
         setPositions([]);
+        setTransactions([]);
         return;
       }
 
@@ -67,6 +83,15 @@ export const ReviewExtraction = () => {
         .returns<ExtractedPositionRow[]>();
 
       setPositions(data ?? []);
+
+      const { data: txData } = await supabase
+        .from('extracted_transactions')
+        .select('*')
+        .in('document_id', docIds)
+        .eq('confirmed', false)
+        .order('created_at', { ascending: false });
+        
+      setTransactions(txData as any ?? []);
     } catch (error) {
       console.error('Error loading extracted positions:', error);
     } finally {
@@ -111,6 +136,21 @@ export const ReviewExtraction = () => {
     }
   };
 
+  const handleDiscardTx = async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('extracted_transactions')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
+      setTransactions(transactions.filter(p => p.id !== id));
+    } catch (error) {
+      console.error('Error discarding transaction:', error);
+    }
+  };
+
   const handleConfirmAll = async () => {
     setConfirming(true);
     try {
@@ -139,6 +179,28 @@ export const ReviewExtraction = () => {
           .eq('id', position.id);
       }
 
+      for (const tx of transactions) {
+        const { data: document } = await supabase
+          .from('documents')
+          .select('client_id')
+          .eq('id', tx.document_id)
+          .maybeSingle() as { data: Pick<DocumentRow, 'client_id'> | null };
+
+        if (!document) continue;
+
+        await supabase.from('transactions').insert([{
+          client_id: document.client_id,
+          document_id: tx.document_id,
+          description: tx.description,
+          amount: tx.amount,
+          type: tx.type,
+          category: tx.category,
+          date: tx.date || new Date().toISOString().split('T')[0],
+        }]);
+
+        await supabase.from('extracted_transactions').update({ confirmed: true }).eq('id', tx.id);
+      }
+
       navigate(role === 'cliente' ? '/client-dashboard' : '/dashboard');
     } catch (error) {
       console.error('Error confirming positions:', error);
@@ -155,7 +217,7 @@ export const ReviewExtraction = () => {
     );
   }
 
-  if (positions.length === 0) {
+  if (positions.length === 0 && transactions.length === 0) {
     return (
       <div className="max-w-2xl mx-auto">
         <Card>
@@ -185,10 +247,11 @@ export const ReviewExtraction = () => {
         </div>
         <Button onClick={handleConfirmAll} disabled={confirming}>
           <CheckCircle className="h-4 w-4 mr-2" />
-          {confirming ? 'Confirming...' : `Confirm All (${positions.length})`}
+          {confirming ? 'Confirming...' : `Confirmar Tudo (${positions.length + transactions.length})`}
         </Button>
       </div>
 
+      {positions.length > 0 && (
       <Card>
         <CardHeader>
           <CardTitle>Posições pendentes</CardTitle>
@@ -299,6 +362,51 @@ export const ReviewExtraction = () => {
           </Table>
         </CardContent>
       </Card>
+      )}
+
+      {transactions.length > 0 && (
+      <Card>
+        <CardHeader>
+          <CardTitle>Transações pendentes</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Data</TableHead>
+                <TableHead>Descrição</TableHead>
+                <TableHead>Tipo</TableHead>
+                <TableHead>Valor</TableHead>
+                <TableHead>Ações</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {transactions.map((tx) => (
+                <TableRow key={tx.id}>
+                  <TableCell>{tx.date || '-'}</TableCell>
+                  <TableCell><span className="font-medium">{tx.description}</span></TableCell>
+                  <TableCell>
+                    <span className={`px-2 py-1 rounded-md text-xs font-medium ${tx.type === 'receita' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                      {tx.type}
+                    </span>
+                  </TableCell>
+                  <TableCell className={tx.type === 'receita' ? 'text-emerald-600 font-semibold' : 'text-red-600 font-semibold'}>
+                    {tx.type === 'receita' ? '+' : '-'}{formatCurrency(Number(tx.amount))}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="danger" onClick={() => handleDiscardTx(tx.id)}>
+                        <XCircle className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      )}
 
       <Card className="bg-blue-50 border-blue-200">
         <CardContent>

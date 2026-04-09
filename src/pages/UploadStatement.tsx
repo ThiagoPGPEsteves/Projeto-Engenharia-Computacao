@@ -17,6 +17,14 @@ interface Client {
   name: string;
 }
 
+export interface ExtractedTransaction {
+  description: string;
+  amount: number;
+  type: 'receita' | 'despesa';
+  category?: string;
+  date?: string;
+}
+
 type FlowStep = 'upload' | 'extracting' | 'preview' | 'saving' | 'success';
 
 export const UploadStatement = () => {
@@ -26,9 +34,12 @@ export const UploadStatement = () => {
   const [file, setFile] = useState<File | null>(null);
   const [step, setStep] = useState<FlowStep>('upload');
   const [positions, setPositions] = useState<ExtractedPosition[]>([]);
+  const [transactions, setTransactions] = useState<ExtractedTransaction[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editValues, setEditValues] = useState<ExtractedPosition | null>(null);
+  const [editingTxIndex, setEditingTxIndex] = useState<number | null>(null);
+  const [editTxValues, setEditTxValues] = useState<ExtractedTransaction | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -67,6 +78,7 @@ export const UploadStatement = () => {
       setFile(selectedFile);
       setError(null);
       setPositions([]);
+      setTransactions([]);
       handleExtract(selectedFile);
     }
   };
@@ -79,11 +91,20 @@ export const UploadStatement = () => {
       if (!text.trim()) {
         throw new Error('Não foi possível extrair texto do PDF. Verifique se o arquivo não está protegido ou é uma imagem.');
       }
-      const extracted = await extractPositionsWithAI(text);
-      if (extracted.length === 0) {
-        throw new Error('Nenhuma posição de investimento foi identificada no documento.');
+      const extracted: any = await extractPositionsWithAI(text);
+      if (Array.isArray(extracted)) {
+        if (extracted.length === 0) {
+          throw new Error('Nenhuma posição de investimento ou transação foi identificada.');
+        }
+        setPositions(extracted);
+        setTransactions([]);
+      } else {
+        if (!extracted?.positions?.length && !extracted?.transactions?.length) {
+          throw new Error('Nenhuma posição de investimento ou transação foi identificada.');
+        }
+        setPositions(extracted.positions || []);
+        setTransactions(extracted.transactions || []);
       }
-      setPositions(extracted);
       setStep('preview');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erro ao extrair posições do PDF');
@@ -117,7 +138,7 @@ export const UploadStatement = () => {
   };
 
   const handleConfirmAndSave = async () => {
-    if (!selectedClient || positions.length === 0) return;
+    if (!selectedClient || (positions.length === 0 && transactions.length === 0)) return;
 
     setStep('saving');
     setError(null);
@@ -147,6 +168,21 @@ export const UploadStatement = () => {
 
       if (extractError) throw extractError;
 
+      const extractedTransactions = transactions.map(tx => ({
+        document_id: documentId,
+        description: tx.description,
+        amount: tx.amount,
+        type: tx.type,
+        category: tx.category || 'Outros',
+        date: tx.date || new Date().toISOString().split('T')[0],
+        confirmed: false,
+      }));
+
+      if (extractedTransactions.length > 0) {
+        const { error: txError } = await supabase.from('extracted_transactions').insert(extractedTransactions);
+        if (txError) throw txError;
+      }
+
       setStep('success');
       setTimeout(() => navigate('/review'), 2000);
     } catch (err) {
@@ -158,6 +194,7 @@ export const UploadStatement = () => {
   const handleReset = () => {
     setFile(null);
     setPositions([]);
+    setTransactions([]);
     setError(null);
     setStep('upload');
     setEditingIndex(null);
@@ -389,8 +426,88 @@ export const UploadStatement = () => {
         </Card>
       )}
 
+      {step === 'preview' && transactions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-amber-500" />
+              <CardTitle>Transações Extraídas ({transactions.length})</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Data</TableHead>
+                  <TableHead>Descrição</TableHead>
+                  <TableHead>Tipo</TableHead>
+                  <TableHead>Valor</TableHead>
+                  <TableHead>Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {transactions.map((tx, index) => (
+                  <TableRow key={index}>
+                    {editingTxIndex === index && editTxValues ? (
+                      <>
+                        <TableCell>
+                          <Input value={editTxValues.date || ''} onChange={(e) => setEditTxValues({ ...editTxValues, date: e.target.value })} placeholder="YYYY-MM-DD" />
+                        </TableCell>
+                        <TableCell>
+                          <Input value={editTxValues.description} onChange={(e) => setEditTxValues({ ...editTxValues, description: e.target.value })} />
+                        </TableCell>
+                        <TableCell>
+                          <select value={editTxValues.type} onChange={(e) => setEditTxValues({ ...editTxValues, type: e.target.value as 'receita' | 'despesa' })} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm">
+                            <option value="receita">Receita</option>
+                            <option value="despesa">Despesa</option>
+                          </select>
+                        </TableCell>
+                        <TableCell>
+                          <Input type="number" value={editTxValues.amount} onChange={(e) => setEditTxValues({ ...editTxValues, amount: Number(e.target.value) })} />
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex gap-1">
+                            <Button variant="ghost" size="sm" onClick={() => { setTransactions(prev => prev.map((t, i) => i === editingTxIndex ? editTxValues : t)); setEditingTxIndex(null); setEditTxValues(null); }}>
+                              <Save className="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => { setEditingTxIndex(null); setEditTxValues(null); }}>
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </>
+                    ) : (
+                      <>
+                        <TableCell>{tx.date || '-'}</TableCell>
+                        <TableCell><span className="font-medium">{tx.description}</span></TableCell>
+                        <TableCell>
+                          <span className={`px-2 py-1 rounded-md text-xs font-medium ${tx.type === 'receita' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                            {tx.type}
+                          </span>
+                        </TableCell>
+                        <TableCell>{formatCurrency(tx.amount)}</TableCell>
+                        <TableCell>
+                          <div className="flex gap-1">
+                            <Button variant="ghost" size="sm" onClick={() => { setEditingTxIndex(index); setEditTxValues({ ...tx }); }}>
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setTransactions(prev => prev.filter((_, i) => i !== index))}>
+                              <Trash2 className="h-4 w-4 text-red-500" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Botão de salvar */}
-      {step === 'preview' && positions.length > 0 && (
+      {step === 'preview' && (positions.length > 0 || transactions.length > 0) && (
         <div className="flex justify-end gap-3">
           <Button variant="secondary" onClick={handleReset}>
             Cancelar
